@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 
-from .config import DEFAULT_ONION_STARTUP_SCRIPT, detect_retroarch_cfg
+from .config import DEFAULT_ONION_STARTUP_SCRIPT, detect_muos_mount, detect_retroarch_cfg
 
 DEFAULT_KNULLI_ROMS_ROOT = Path("/userdata/roms")
 DEFAULT_KNULLI_STARTUP_SCRIPT = Path("/userdata/system/custom.sh")
@@ -17,6 +18,14 @@ def resolve_retroarch_cfg(config_data: dict) -> str:
 
 
 def resolve_rom_root(config_data: dict) -> Path:
+    configured = config_data.get("roms_root") or os.environ.get(
+        "RAOFFLINEPROXY_ROMS_ROOT"
+    )
+    if configured:
+        candidate = Path(str(configured)).expanduser()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
     cfg_path = Path(resolve_retroarch_cfg(config_data))
     values = read_retroarch_cfg_values(cfg_path)
     for key in ROM_DIRECTORY_KEYS:
@@ -29,6 +38,12 @@ def resolve_rom_root(config_data: dict) -> Path:
 
     if DEFAULT_KNULLI_ROMS_ROOT.exists() and DEFAULT_KNULLI_ROMS_ROOT.is_dir():
         return DEFAULT_KNULLI_ROMS_ROOT
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        muos_roms = muos_mount / "ROMS"
+        if muos_roms.exists() and muos_roms.is_dir():
+            return muos_roms
 
     return cfg_path.parent
 

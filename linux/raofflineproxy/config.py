@@ -7,6 +7,25 @@ from pathlib import Path
 DEFAULT_ONION_APP_DIR = Path("/mnt/SDCARD/App/RAOfflineProxy")
 DEFAULT_ONION_STARTUP_SCRIPT = Path("/mnt/SDCARD/.tmp_update/startup/raofflineproxy.sh")
 
+# muOS mounts SD1 at /mnt/mmc and SD2 at /mnt/sdcard. The active card is the one
+# that carries a MUOS/ tree; the app and its data live alongside it so they
+# survive reboots and firmware updates.
+MUOS_MOUNTS = (Path("/mnt/mmc"), Path("/mnt/sdcard"))
+MUOS_APP_SUBPATH = Path("MUOS/application/RAOfflineProxy")
+
+
+def detect_muos_mount() -> Path | None:
+    """Return the muOS storage mount whose MUOS/ tree exists, or None."""
+    env_override = os.environ.get("RAOFFLINEPROXY_MUOS_MOUNT")
+    if env_override:
+        return Path(env_override)
+
+    for mount in MUOS_MOUNTS:
+        if (mount / "MUOS").is_dir():
+            return mount
+
+    return None
+
 
 def resolve_config_dir() -> Path:
     configured = os.environ.get("RAOFFLINEPROXY_CONFIG_DIR")
@@ -22,6 +41,10 @@ def resolve_config_dir() -> Path:
 
     if Path("/userdata/system").exists():
         return Path("/userdata/system/.config/raofflineproxy")
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        return muos_mount / MUOS_APP_SUBPATH / "data"
 
     return Path.home() / ".config" / "raofflineproxy"
 
@@ -145,6 +168,8 @@ def detect_retroarch_cfg() -> str:
         Path("/userdata/system/.config/retroarch/retroarchcustom.cfg"),
         Path("/userdata/system/.config/retroarch/retroarch.cfg"),
         Path("/storage/.config/retroarch/retroarch.cfg"),
+        Path("/mnt/mmc/MUOS/info/config/retroarch.cfg"),
+        Path("/mnt/sdcard/MUOS/info/config/retroarch.cfg"),
         Path.home() / ".config" / "retroarch" / "retroarch.cfg",
     ]
 
@@ -157,6 +182,10 @@ def detect_retroarch_cfg() -> str:
 
     if Path("/storage").exists():
         return str(Path("/storage/.config/retroarch/retroarch.cfg"))
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        return str(muos_mount / "MUOS/info/config/retroarch.cfg")
 
     if Path("/mnt/SDCARD").exists():
         return str(Path("/mnt/SDCARD/RetroArch/.retroarch/retroarch.cfg"))

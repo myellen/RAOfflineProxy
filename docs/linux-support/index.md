@@ -17,6 +17,7 @@ Use the `KNULLI` and `Onion` tabs throughout the Linux section to switch target-
 
 - KNULLI (alpha)
 - Onion (experimental)
+- muOS (experimental)
 - ROCKNIX (planned)
 
 ## Specifics
@@ -47,6 +48,20 @@ Current rough edges:
 
 - The bundled runtime is still larger than ideal and takes time to copy to SD storage
 - Patch-state persistence still deserves more cleanup
+
+== muOS
+
+muOS (MustardOS) is an experimental Linux target. The shared Linux core, RetroArch config patching, offline cache, and award flush are reused as-is; only the install/launch integration is muOS-specific.
+
+It is packaged as a `.muxapp` and installed from **Applications > Archive Manager**, then launched from the **Applications** menu.
+
+See [`linux/muos/README.md`](https://github.com/misantronic/RAOfflineProxy/blob/main/linux/muos/README.md) for build, install, and beta-testing instructions.
+
+Current rough edges:
+
+- Not yet verified on physical muOS hardware; treat as a beta target
+- The on-device menu needs `pygame`; on first launch it is installed via `pip` (one-time Wi-Fi), or bundled offline wheels can be baked into the `.muxapp`
+- Autostart is not wired for muOS yet, so the proxy is started manually from the menu
 
 :::
 
