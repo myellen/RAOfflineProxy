@@ -79,6 +79,58 @@ class MenuLayoutTests(unittest.TestCase):
             "PROXY: STOPPED OFFLINE, LOGIN REQUIRED",
         )
 
+    def test_status_warns_when_muos_config_freedom_off(self) -> None:
+        session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
+        session.view = "main"
+        session.main_logged_in = True
+        session.main_online = True
+        session.main_config_freedom = False
+        session.refresh_main_menu_state = lambda force=False: None
+
+        self.assertEqual(
+            menu_sdl.MenuSdlSession.status_text(session, running=True),
+            "PROXY: RUNNING ONLINE, ENABLE RA CONFIG FREEDOM",
+        )
+
+    def test_status_has_no_freedom_warning_when_unknown_or_on(self) -> None:
+        for freedom in (None, True):
+            session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
+            session.view = "main"
+            session.main_logged_in = True
+            session.main_online = True
+            session.main_config_freedom = freedom
+            session.refresh_main_menu_state = lambda force=False: None
+
+            self.assertEqual(
+                menu_sdl.MenuSdlSession.status_text(session, running=True),
+                "PROXY: RUNNING ONLINE",
+            )
+
+    def test_bottom_hint_warns_about_config_freedom_when_off(self) -> None:
+        session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
+        session.view = "main"
+        session.main_logged_in = True
+        session.main_config_freedom = False
+        session.refresh_main_menu_state = lambda force=False: None
+
+        self.assertEqual(
+            menu_sdl.MenuSdlSession.bottom_hint_text(session),
+            "Enable Settings > Advanced > RetroArch Config Freedom, "
+            "or the proxy redirect won't persist.",
+        )
+
+    def test_bottom_hint_prefers_login_when_not_logged_in(self) -> None:
+        session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
+        session.view = "main"
+        session.main_logged_in = False
+        session.main_config_freedom = False
+        session.refresh_main_menu_state = lambda force=False: None
+
+        self.assertEqual(
+            menu_sdl.MenuSdlSession.bottom_hint_text(session),
+            "Login to RetroAchievements in system settings.",
+        )
+
     def test_cached_games_status_shows_count_out_of_fifty(self) -> None:
         session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
         session.view = "cached_games"
@@ -189,6 +241,24 @@ class MenuLayoutTests(unittest.TestCase):
             )
             menu_sdl.MenuSdlSession.refresh_cached_games = original_refresh_cached_games
             menu_sdl.load_config = original_load_config
+
+    def test_controls_label_only_appears_on_muos(self) -> None:
+        def make(is_muos: bool):
+            session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)
+            session.view = "main"
+            session.refresh_main_menu_state = lambda force=False: None
+            session.main_autostart_supported = False
+            session.main_logged_in = False
+            session.pending_awards = []
+            session.is_muos = is_muos
+            return session
+
+        self.assertIn(
+            "Controls", menu_sdl.MenuSdlSession.labels(make(True), running=False)
+        )
+        self.assertNotIn(
+            "Controls", menu_sdl.MenuSdlSession.labels(make(False), running=False)
+        )
 
     def test_smart_cache_prompt_labels(self) -> None:
         session = menu_sdl.MenuSdlSession.__new__(menu_sdl.MenuSdlSession)

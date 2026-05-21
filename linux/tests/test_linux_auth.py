@@ -1,9 +1,12 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from linux.raofflineproxy import auth
 from linux.raofflineproxy import cache_keys
+from linux.raofflineproxy import platform
 from linux.raofflineproxy import retroarch_cfg
 from linux.raofflineproxy import storage
 
@@ -121,6 +124,145 @@ class LinuxAuthTests(unittest.TestCase):
                     credentials,
                     {"user": "misantronic", "token": "cfg-token"},
                 )
+            finally:
+                store.close()
+
+
+    def test_muos_cheevos_cfg_is_a_credential_candidate(self) -> None:
+        from linux.raofflineproxy import config
+
+        listed = [str(p) for p in config._retroarch_cfg_candidate_list()]
+        self.assertIn(
+            "/opt/muos/share/info/config/retroarch.cheevos.cfg", listed
+        )
+        self.assertLess(
+            listed.index("/opt/muos/share/info/config/retroarch.cfg"),
+            listed.index("/opt/muos/share/info/config/retroarch.cheevos.cfg"),
+        )
+
+    def test_credentials_any_searches_every_cfg(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            no_creds = root / "primary.cfg"
+            no_creds.write_text('cheevos_enable = "true"\n', encoding="utf-8")
+            has_creds = root / "secondary.cfg"
+            has_creds.write_text(
+                'cheevos_username = "misantronic"\ncheevos_token = "tok"\n',
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                retroarch_cfg.load_retroarch_credentials_any([str(no_creds)])
+            )
+            self.assertEqual(
+                retroarch_cfg.load_retroarch_credentials_any(
+                    [str(no_creds), str(has_creds)]
+                ),
+                {"user": "misantronic", "token": "tok"},
+            )
+
+    def test_search_list_is_primary_first_and_deduped(self) -> None:
+        with mock.patch(
+            "linux.raofflineproxy.platform.retroarch_cfg_candidates",
+            return_value=["/a/primary.cfg", "/b/other.cfg"],
+        ):
+            result = platform.resolve_retroarch_cfg_search(
+                {"retroarch_cfg": "/a/primary.cfg"}
+            )
+        self.assertEqual(result, ["/a/primary.cfg", "/b/other.cfg"])
+
+    def test_resolve_credentials_falls_back_to_other_cfg_for_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            primary = root / "primary.cfg"
+            primary.write_text(
+                'cheevos_custom_host = "127.0.0.1:8080"\n', encoding="utf-8"
+            )
+            other = root / "login.cfg"
+            other.write_text(
+                'cheevos_username = "misantronic"\ncheevos_token = "real-token"\n',
+                encoding="utf-8",
+            )
+            store = storage.Storage(database_path=root / "t.sqlite3")
+            try:
+                with mock.patch(
+                    "linux.raofflineproxy.platform.retroarch_cfg_candidates",
+                    return_value=[str(other)],
+                ):
+                    creds = auth.resolve_credentials(
+                        store, {"retroarch_cfg": str(primary)}, "RetroArch/1.20.0"
+                    )
+                self.assertEqual(creds, {"user": "misantronic", "token": "real-token"})
+                self.assertIsNotNone(store.get_cache(cache_keys.login("misantronic")))
+            finally:
+                store.close()
+
+    def test_resolve_credentials_prefers_primary_cfg_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            primary = root / "primary.cfg"
+            primary.write_text(
+                'cheevos_username = "misantronic"\ncheevos_token = "primary-token"\n',
+                encoding="utf-8",
+            )
+            other = root / "other.cfg"
+            other.write_text(
+                'cheevos_username = "someoneelse"\ncheevos_token = "other-token"\n',
+                encoding="utf-8",
+            )
+            store = storage.Storage(database_path=root / "t.sqlite3")
+            try:
+                with mock.patch(
+                    "linux.raofflineproxy.platform.retroarch_cfg_candidates",
+                    return_value=[str(other)],
+                ):
+                    creds = auth.resolve_credentials(
+                        store, {"retroarch_cfg": str(primary)}, "RetroArch/1.20.0"
+                    )
+                self.assertEqual(
+                    creds, {"user": "misantronic", "token": "primary-token"}
+                )
+            finally:
+                store.close()
+
+
+    def test_import_saved_login_seeds_login_cache_from_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cfg = root / "retroarch.cfg"
+            cfg.write_text(
+                'cheevos_username = "tester"\ncheevos_token = "TOK"\n', encoding="utf-8"
+            )
+            store = storage.Storage(database_path=root / "t.sqlite3")
+            try:
+                self.assertIsNone(store.get_cache(cache_keys.login("tester")))
+                result = auth.import_saved_login(store, {"retroarch_cfg": str(cfg)})
+                self.assertEqual(result, {"user": "tester", "token": "TOK"})
+                cached = store.get_cache(cache_keys.login("tester"))
+                self.assertIsNotNone(cached)
+                payload = json.loads(cached["responseBody"])
+                self.assertTrue(payload["Success"])
+                self.assertEqual(payload["Token"], "TOK")
+            finally:
+                store.close()
+
+    def test_import_saved_login_keeps_richer_existing_login(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cfg = root / "retroarch.cfg"
+            cfg.write_text(
+                'cheevos_username = "tester"\ncheevos_token = "TOK"\n', encoding="utf-8"
+            )
+            store = storage.Storage(database_path=root / "t.sqlite3")
+            try:
+                store.upsert_cache(
+                    cache_keys.login("tester"),
+                    '{"Success":true,"User":"tester","Token":"TOK","Score":999}',
+                )
+                auth.import_saved_login(store, {"retroarch_cfg": str(cfg)})
+                payload = json.loads(
+                    store.get_cache(cache_keys.login("tester"))["responseBody"]
+                )
+                self.assertEqual(payload["Score"], 999)
             finally:
                 store.close()
 

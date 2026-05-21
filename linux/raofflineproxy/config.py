@@ -7,6 +7,21 @@ from pathlib import Path
 DEFAULT_ONION_APP_DIR = Path("/mnt/SDCARD/App/RAOfflineProxy")
 DEFAULT_ONION_STARTUP_SCRIPT = Path("/mnt/SDCARD/.tmp_update/startup/raofflineproxy.sh")
 
+MUOS_MOUNTS = (Path("/mnt/mmc"), Path("/mnt/sdcard"))
+MUOS_APP_SUBPATH = Path("MUOS/application/RAOfflineProxy")
+
+
+def detect_muos_mount() -> Path | None:
+    env_override = os.environ.get("RAOFFLINEPROXY_MUOS_MOUNT")
+    if env_override:
+        return Path(env_override)
+
+    for mount in MUOS_MOUNTS:
+        if (mount / "MUOS").is_dir():
+            return mount
+
+    return None
+
 
 def resolve_config_dir() -> Path:
     configured = os.environ.get("RAOFFLINEPROXY_CONFIG_DIR")
@@ -22,6 +37,10 @@ def resolve_config_dir() -> Path:
 
     if Path("/userdata/system").exists():
         return Path("/userdata/system/.config/raofflineproxy")
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        return muos_mount / MUOS_APP_SUBPATH / "data"
 
     return Path.home() / ".config" / "raofflineproxy"
 
@@ -132,12 +151,8 @@ def detect_batocera_conf(config_data: dict) -> str | None:
     return None
 
 
-def detect_retroarch_cfg() -> str:
-    env_override = os.environ.get("RAOFFLINEPROXY_RETROARCH_CFG")
-    if env_override:
-        return env_override
-
-    candidates = [
+def _retroarch_cfg_candidate_list() -> list[Path]:
+    return [
         Path("/mnt/SDCARD/RetroArch/.retroarch/retroarch.cfg"),
         Path("/mnt/SDCARD/.tmp_update/config/retroarch.cfg"),
         Path("/userdata/system/configs/retroarch/retroarchcustom.cfg"),
@@ -145,10 +160,37 @@ def detect_retroarch_cfg() -> str:
         Path("/userdata/system/.config/retroarch/retroarchcustom.cfg"),
         Path("/userdata/system/.config/retroarch/retroarch.cfg"),
         Path("/storage/.config/retroarch/retroarch.cfg"),
+        Path("/opt/muos/share/info/config/retroarch.cfg"),
+        Path("/opt/muos/share/info/config/retroarch.cheevos.cfg"),
+        Path("/mnt/mmc/MUOS/info/config/retroarch.cfg"),
+        Path("/mnt/mmc/MUOS/info/config/retroarch.cheevos.cfg"),
+        Path("/mnt/sdcard/MUOS/info/config/retroarch.cfg"),
+        Path("/mnt/sdcard/MUOS/info/config/retroarch.cheevos.cfg"),
         Path.home() / ".config" / "retroarch" / "retroarch.cfg",
     ]
 
-    for candidate in candidates:
+
+def retroarch_cfg_candidates() -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    env_override = os.environ.get("RAOFFLINEPROXY_RETROARCH_CFG")
+    ordered = ([Path(env_override)] if env_override else []) + _retroarch_cfg_candidate_list()
+    for candidate in ordered:
+        text = str(candidate)
+        if text in seen:
+            continue
+        seen.add(text)
+        if candidate.exists():
+            paths.append(text)
+    return paths
+
+
+def detect_retroarch_cfg() -> str:
+    env_override = os.environ.get("RAOFFLINEPROXY_RETROARCH_CFG")
+    if env_override:
+        return env_override
+
+    for candidate in _retroarch_cfg_candidate_list():
         if candidate.exists():
             return str(candidate)
 
@@ -157,6 +199,10 @@ def detect_retroarch_cfg() -> str:
 
     if Path("/storage").exists():
         return str(Path("/storage/.config/retroarch/retroarch.cfg"))
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        return str(muos_mount / "MUOS/info/config/retroarch.cfg")
 
     if Path("/mnt/SDCARD").exists():
         return str(Path("/mnt/SDCARD/RetroArch/.retroarch/retroarch.cfg"))

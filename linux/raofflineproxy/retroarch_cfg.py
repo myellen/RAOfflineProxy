@@ -57,6 +57,28 @@ def load_retroarch_password_credentials(cfg_path: str | None) -> dict | None:
     return {"user": user, "password": password}
 
 
+def load_retroarch_token_credentials_any(cfg_paths) -> dict | None:
+    for path in cfg_paths:
+        credentials = load_retroarch_token_credentials(path)
+        if credentials is not None:
+            return credentials
+    return None
+
+
+def load_retroarch_password_credentials_any(cfg_paths) -> dict | None:
+    for path in cfg_paths:
+        credentials = load_retroarch_password_credentials(path)
+        if credentials is not None:
+            return credentials
+    return None
+
+
+def load_retroarch_credentials_any(cfg_paths) -> dict | None:
+    return load_retroarch_token_credentials_any(cfg_paths) or (
+        load_retroarch_password_credentials_any(cfg_paths)
+    )
+
+
 def retroarch_has_token(cfg_path: str | None) -> bool:
     return load_retroarch_credentials(cfg_path) is not None
 
@@ -209,6 +231,30 @@ def enforce_patched_cfg(cfg_path: str, config_data: dict) -> bool:
         return False
 
     target.write_text(transformed, encoding="utf-8")
+    return True
+
+
+def appended_cheevos_cfg_path(cfg_path: str) -> Optional[str]:
+    sibling = Path(cfg_path).parent / "retroarch.cheevos.cfg"
+    return str(sibling) if sibling.exists() else None
+
+
+def patch_appended_cheevos_cfg(cfg_path: str, config_data: dict) -> bool:
+    cheevos = appended_cheevos_cfg_path(cfg_path)
+    if cheevos is None:
+        return False
+    return enforce_patched_cfg(cheevos, config_data)
+
+
+def revert_appended_cheevos_cfg(cfg_path: str) -> bool:
+    cheevos = appended_cheevos_cfg_path(cfg_path)
+    if cheevos is None:
+        return False
+    content = Path(cheevos).read_text(encoding="utf-8", errors="replace")
+    transformed = _upsert_config_value(content, HOST_KEY, "")
+    if transformed == content:
+        return False
+    Path(cheevos).write_text(transformed, encoding="utf-8")
     return True
 
 

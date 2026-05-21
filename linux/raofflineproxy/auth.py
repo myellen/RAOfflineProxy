@@ -2,11 +2,12 @@ import json
 import logging
 
 from . import cache_keys
-from .config import FALLBACK_USER_AGENT, detect_retroarch_cfg, upstream_host
+from .config import FALLBACK_USER_AGENT, upstream_host
 from .network import build_api_url, http_get
+from .platform import resolve_retroarch_cfg_search
 from .retroarch_cfg import (
-    load_retroarch_password_credentials,
-    load_retroarch_token_credentials,
+    load_retroarch_password_credentials_any,
+    load_retroarch_token_credentials_any,
 )
 from .storage import Storage
 from .utils import proxy_user_agent
@@ -20,8 +21,8 @@ def resolve_credentials(
     user_agent: str = FALLBACK_USER_AGENT,
 ) -> dict | None:
     config_data = config_data or {}
-    cfg_path = str(config_data.get("retroarch_cfg") or detect_retroarch_cfg())
-    token_credentials = load_retroarch_token_credentials(cfg_path)
+    search_paths = resolve_retroarch_cfg_search(config_data)
+    token_credentials = load_retroarch_token_credentials_any(search_paths)
     if token_credentials is not None:
         return cache_token_credentials(storage, token_credentials)
 
@@ -29,7 +30,7 @@ def resolve_credentials(
     if cached is not None:
         return cached
 
-    password_credentials = load_retroarch_password_credentials(cfg_path)
+    password_credentials = load_retroarch_password_credentials_any(search_paths)
     if password_credentials is None:
         return None
 
@@ -44,6 +45,34 @@ def cache_token_credentials(storage: Storage, credentials: dict) -> dict | None:
 
     body = json.dumps({"Success": True, "User": user, "Token": token})
     storage.upsert_cache(cache_keys.login(user), body)
+    return {"user": user, "token": token}
+
+
+def import_saved_login(storage: Storage, config_data: dict | None = None) -> dict | None:
+    config_data = config_data or {}
+    credentials = load_retroarch_token_credentials_any(
+        resolve_retroarch_cfg_search(config_data)
+    )
+    if credentials is None:
+        return None
+
+    user = credentials["user"]
+    token = credentials["token"]
+    if storage.get_cache(cache_keys.login(user)) is None:
+        storage.upsert_cache(
+            cache_keys.login(user),
+            json.dumps(
+                {
+                    "Success": True,
+                    "User": user,
+                    "Token": token,
+                    "Score": 0,
+                    "SoftcoreScore": 0,
+                    "Messages": 0,
+                },
+                separators=(",", ":"),
+            ),
+        )
     return {"user": user, "token": token}
 
 

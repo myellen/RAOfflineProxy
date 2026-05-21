@@ -87,3 +87,8 @@ def read_keys(handles: list[object]) -> list[int]:
                     elif value > 0:
                         keys.append(BTN_DPAD_RIGHT)
     return keys
+
+
+def read_next_key(handles: list[object]) -> int | None:
+    keys = read_keys(handles)
+    return keys[0] if keys else None
