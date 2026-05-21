@@ -23,6 +23,20 @@ def key_event(code: int, value: int = 1) -> bytes:
     return struct.pack("llHHi", 0, 0, menu_input.EV_KEY, code, value)
 
 
+def abs_event(code: int, value: int) -> bytes:
+    return struct.pack("llHHi", 0, 0, menu_input.EV_ABS, code, value)
+
+
+def drain(events: list[bytes]) -> list[int]:
+    handle = FakeHandle(events)
+    original_select = menu_input.select.select
+    try:
+        menu_input.select.select = lambda handles, _w, _x, _t: (handles, [], [])
+        return menu_input.read_keys([handle])
+    finally:
+        menu_input.select.select = original_select
+
+
 class LinuxMenuInputTests(unittest.TestCase):
     def test_read_keys_drains_all_available_events(self) -> None:
         handle = FakeHandle(
@@ -67,6 +81,25 @@ class LinuxMenuInputTests(unittest.TestCase):
             self.assertEqual(keys, [])
         finally:
             menu_input.select.select = original_select
+
+
+    def test_dpad_hat_maps_to_directions(self) -> None:
+        # Many muOS handhelds report the D-pad as an EV_ABS hat axis.
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0Y, -1)]), [menu_input.BTN_DPAD_UP])
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0Y, 1)]), [menu_input.BTN_DPAD_DOWN])
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0X, -1)]), [menu_input.BTN_DPAD_LEFT])
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0X, 1)]), [menu_input.BTN_DPAD_RIGHT])
+
+    def test_dpad_hat_release_is_ignored(self) -> None:
+        # Centering the hat (value 0) must not emit a direction.
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0Y, 0)]), [])
+        self.assertEqual(drain([abs_event(menu_input.ABS_HAT0X, 0)]), [])
+
+    def test_key_release_and_autorepeat_are_ignored(self) -> None:
+        # Only key-down (value 1) registers; release (0) and autorepeat (2) do not.
+        self.assertEqual(drain([key_event(menu_input.KEY_ENTER, 0)]), [])
+        self.assertEqual(drain([key_event(menu_input.KEY_ENTER, 2)]), [])
+        self.assertEqual(drain([key_event(menu_input.KEY_ENTER, 1)]), [menu_input.KEY_ENTER])
 
 
 if __name__ == "__main__":

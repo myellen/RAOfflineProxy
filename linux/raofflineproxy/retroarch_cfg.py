@@ -57,6 +57,35 @@ def load_retroarch_password_credentials(cfg_path: str | None) -> dict | None:
     return {"user": user, "password": password}
 
 
+def load_retroarch_token_credentials_any(cfg_paths) -> dict | None:
+    """First token credentials found across an ordered list of cfg paths."""
+    for path in cfg_paths:
+        credentials = load_retroarch_token_credentials(path)
+        if credentials is not None:
+            return credentials
+    return None
+
+
+def load_retroarch_password_credentials_any(cfg_paths) -> dict | None:
+    """First password credentials found across an ordered list of cfg paths."""
+    for path in cfg_paths:
+        credentials = load_retroarch_password_credentials(path)
+        if credentials is not None:
+            return credentials
+    return None
+
+
+def load_retroarch_credentials_any(cfg_paths) -> dict | None:
+    """Token (preferred) then password credentials, searched across cfg paths.
+
+    muOS can store the RA login in a different cfg than the one we patch, so the
+    "are we logged in?" check looks in every known cfg, not just the primary.
+    """
+    return load_retroarch_token_credentials_any(cfg_paths) or (
+        load_retroarch_password_credentials_any(cfg_paths)
+    )
+
+
 def retroarch_has_token(cfg_path: str | None) -> bool:
     return load_retroarch_credentials(cfg_path) is not None
 
@@ -209,6 +238,43 @@ def enforce_patched_cfg(cfg_path: str, config_data: dict) -> bool:
         return False
 
     target.write_text(transformed, encoding="utf-8")
+    return True
+
+
+def appended_cheevos_cfg_path(cfg_path: str) -> Optional[str]:
+    """The muOS retroarch.cheevos.cfg appended next to cfg_path, if it exists.
+
+    muOS --appendconfig's this sibling AFTER the global cfg, so ITS cheevos_*
+    values win -- including a cheevos_custom_host="" that silently undoes our
+    redirect. Returns the path when present so we can patch it too; None when
+    absent (i.e. not muOS / no separate cheevos config).
+    """
+    sibling = Path(cfg_path).parent / "retroarch.cheevos.cfg"
+    return str(sibling) if sibling.exists() else None
+
+
+def patch_appended_cheevos_cfg(cfg_path: str, config_data: dict) -> bool:
+    """Apply the proxy patch to the appended retroarch.cheevos.cfg too, so its
+    cheevos_custom_host points at the proxy instead of overriding it with "".
+    No-op (returns False) when the sibling file is absent."""
+    cheevos = appended_cheevos_cfg_path(cfg_path)
+    if cheevos is None:
+        return False
+    return enforce_patched_cfg(cheevos, config_data)
+
+
+def revert_appended_cheevos_cfg(cfg_path: str) -> bool:
+    """Clear cheevos_custom_host back to muOS's default empty value in the
+    appended retroarch.cheevos.cfg, so a stopped proxy is no longer targeted.
+    No-op when the file is absent or already clear."""
+    cheevos = appended_cheevos_cfg_path(cfg_path)
+    if cheevos is None:
+        return False
+    content = Path(cheevos).read_text(encoding="utf-8", errors="replace")
+    transformed = _upsert_config_value(content, HOST_KEY, "")
+    if transformed == content:
+        return False
+    Path(cheevos).write_text(transformed, encoding="utf-8")
     return True
 
 

@@ -1,3 +1,4 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
@@ -380,6 +381,42 @@ class LinuxProxyCacheKeyTests(unittest.TestCase):
                 self.assertIn('"Token":"abc"', cached["responseBody"])
             finally:
                 store.close()
+
+
+    def test_offline_login_response_synthesizes_success_from_username(self) -> None:
+        runtime = proxy_service.ProxyRuntimeServer.__new__(
+            proxy_service.ProxyRuntimeServer
+        )
+        payload = json.loads(
+            runtime.build_offline_login_response(
+                "/dorequest.php", "r=login2&u=kamenhikari&t=TKN"
+            )
+        )
+        self.assertTrue(payload["Success"])
+        self.assertEqual(payload["User"], "kamenhikari")
+        self.assertEqual(payload["Token"], "TKN")
+        # No username in the request -> nothing to log in as.
+        self.assertIsNone(
+            runtime.build_offline_login_response("/dorequest.php", "r=login2")
+        )
+
+    def test_offline_login2_synthesized_when_not_cached(self) -> None:
+        class _NoCacheStorage:
+            def get_cache(self, _key):
+                return None
+
+            def get_cache_by_prefix(self, _prefix):
+                return None
+
+        runtime = proxy_service.ProxyRuntimeServer.__new__(
+            proxy_service.ProxyRuntimeServer
+        )
+        runtime.storage = _NoCacheStorage()
+        response = runtime.handle_offline_request(
+            "/dorequest.php", "r=login2&u=kamenhikari&p=secret", "login2"
+        )
+        self.assertIn(b'"Success":true', response)
+        self.assertIn(b"kamenhikari", response)
 
 
 if __name__ == "__main__":

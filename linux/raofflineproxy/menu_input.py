@@ -87,3 +87,14 @@ def read_keys(handles: list[object]) -> list[int]:
                     elif value > 0:
                         keys.append(BTN_DPAD_RIGHT)
     return keys
+
+
+def read_next_key(handles: list[object]) -> int | None:
+    """Return the first decoded key code currently available, else None.
+
+    Used by the calibration screen to capture whichever raw code a physical
+    button emits, decoded the same way as read_keys (so hat axes map to the
+    BTN_DPAD_* synthetics).
+    """
+    keys = read_keys(handles)
+    return keys[0] if keys else None

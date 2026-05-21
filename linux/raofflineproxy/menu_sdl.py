@@ -6,20 +6,25 @@ import time
 from pathlib import Path
 
 from .batocera_conf import patch_batocera_conf, revert_batocera_conf
-from .config import CONFIG_DIR, load_config
+from .config import CONFIG_DIR, detect_muos_mount, load_config
 from .platform import (
     autostart_enabled,
     autostart_supported,
     disable_autostart,
     enable_autostart,
+    muos_retroarch_config_freedom,
+    muos_uninstall_paths,
     resolve_retroarch_cfg,
+    resolve_retroarch_cfg_search,
     resolve_rom_root,
 )
 from .pending_awards import delete_pending_award, list_pending_awards
 from .network import online_check
 from .retroarch_cfg import (
-    load_retroarch_credentials,
+    load_retroarch_credentials_any,
+    patch_appended_cheevos_cfg,
     patch_retroarch_cfg,
+    revert_appended_cheevos_cfg,
     revert_retroarch_cfg,
 )
 from .rom_browser import (
@@ -39,27 +44,20 @@ from .smart_cache import SMART_CACHE_LIMIT, run_smart_cache, should_offer_smart_
 from .state import load_patch_state, save_patch_state
 from .storage import Storage
 from .menu_input import (
-    BTN_DPAD_DOWN,
-    BTN_DPAD_LEFT,
-    BTN_DPAD_RIGHT,
-    BTN_DPAD_UP,
-    BTN_EAST,
-    BTN_SELECT,
-    BTN_SOUTH,
-    BTN_START,
-    KEY_BACKSPACE,
-    KEY_DOWN,
-    KEY_ENTER,
     KEY_ESC,
-    KEY_LEFT,
-    KEY_Q,
-    KEY_RIGHT,
-    KEY_S,
-    KEY_SPACE,
-    KEY_UP,
     close_input_devices,
     open_input_devices,
     read_keys,
+    read_next_key,
+)
+from .input_map import (
+    ACTION_LABELS,
+    ACTIONS,
+    action_for,
+    load_input_map,
+    load_saved_input_map,
+    merge_calibration,
+    save_input_map,
 )
 
 SDL_LOG_PATH = CONFIG_DIR / "menu-sdl.log"
@@ -76,6 +74,9 @@ FPS = 60
 LEFT_MARGIN = 32
 GROUP_GAP = 14
 MAIN_MENU_STATE_REFRESH_SECONDS = 1.0
+ERROR_COLOR = (200, 80, 80)
+CALIBRATION_STEP_SECONDS = 6.0
+TEST_CONTROLS_IDLE_SECONDS = 12.0
 FONT_CANDIDATES = [
     "DejaVu Sans Mono",
     "Monospace",
@@ -131,6 +132,12 @@ def start_proxy_inline() -> None:
     config_data, cfg_path = runtime_config()
     remove_stale_hook()
     patch_retroarch_cfg(cfg_path, config_data)
+    # muOS appends retroarch.cheevos.cfg over the global cfg with an empty
+    # cheevos_custom_host, which silently overrides our redirect -- so patch the
+    # proxy host into that appended file too. Pass cfg_path to the service so its
+    # ConfigEnforcer keeps both files patched while the proxy runs.
+    config_data["retroarch_cfg"] = cfg_path
+    patch_appended_cheevos_cfg(cfg_path, config_data)
     batocera = patch_batocera_conf(config_data)
     patch_state = load_patch_state() or {}
     patch_state["batocera_previous"] = batocera.get("previous", {})
@@ -146,6 +153,7 @@ def stop_proxy_inline() -> None:
     patch_state = load_patch_state() or {}
     previous_batocera = patch_state.get("batocera_previous", {})
     revert_batocera_conf(config_data, previous_batocera)
+    revert_appended_cheevos_cfg(cfg_path)
 
     if patch_state:
         revert_retroarch_cfg(cfg_path)
@@ -162,6 +170,31 @@ def stop_proxy_inline() -> None:
         revert_retroarch_cfg(cfg_path)
     except Exception:
         pass
+
+
+def build_uninstall_argv(paths: list[Path]) -> list[str] | None:
+    """Build a safe detached `rm -rf` argv for muOS uninstall.
+
+    Paths are passed as positional args (never interpolated into a shell
+    string), and obviously-dangerous targets (non-absolute, filesystem/mount
+    roots, shallow system dirs) are filtered out so a stray APP_DIR cannot turn
+    this into a destructive command. Returns None if nothing safe remains.
+    """
+    blocked = {
+        "/mnt", "/mnt/mmc", "/mnt/sdcard", "/usr", "/opt", "/lib", "/bin",
+        "/sbin", "/etc", "/var", "/boot", "/home", "/root", "/run", "/sys", "/proc",
+    }
+    safe: list[str] = []
+    for path in paths:
+        # Normalize first so `..` traversal can't escape to a mount/system root
+        # (e.g. .../RAOfflineProxy/../../.. -> /mnt). Delete the normalized path.
+        text = os.path.normpath(str(path))
+        if not text.startswith("/") or text in blocked or text.count("/") < 2:
+            continue
+        safe.append(text)
+    if not safe:
+        return None
+    return ["/bin/sh", "-c", 'sleep 1; exec rm -rf "$@"', "sh", *safe]
 
 
 class MenuSdlSession:
@@ -210,6 +243,11 @@ class MenuSdlSession:
         self.active_game_unlock_count_cached = None
         self.active_game_unlock_titles_cached: list[str] = []
         self.input_handles = open_input_devices()
+        self.input_map = load_input_map()
+        # The controller-calibration ("Controls") screen is surfaced only on
+        # muOS, whose per-device button layouts vary; other targets keep their
+        # existing menu unchanged.
+        self.is_muos = detect_muos_mount() is not None
         self.title_font = self.load_font(max(30, height // 19), bold=True)
         self.status_font = self.load_font(max(20, height // 30))
         self.item_font = self.load_font(max(22, height // 30), bold=False)
@@ -351,6 +389,8 @@ class MenuSdlSession:
             labels.append("Cached games")
         if self.pending_awards:
             labels.append(f"Pending awards ({len(self.pending_awards)})")
+        if getattr(self, "is_muos", False):
+            labels.append("Controls")
         labels.extend(["Uninstall", "Exit Menu"])
         return labels
 
@@ -363,7 +403,8 @@ class MenuSdlSession:
             return True
 
         return (
-            load_retroarch_credentials(resolve_retroarch_cfg(config_data)) is not None
+            load_retroarch_credentials_any(resolve_retroarch_cfg_search(config_data))
+            is not None
         )
 
     def current_labels(self, running: bool | None = None) -> list[str]:
@@ -450,6 +491,8 @@ class MenuSdlSession:
         status = f"PROXY: {proxy_status} {connectivity_status}"
         if not logged_in:
             status += ", LOGIN REQUIRED"
+        if getattr(self, "main_config_freedom", None) is False:
+            status += ", ENABLE RA CONFIG FREEDOM"
         return status
 
     def bottom_hint_text(self) -> str | None:
@@ -472,10 +515,15 @@ class MenuSdlSession:
             else:
                 return text
 
-        if self.is_logged_in():
-            return None
-
-        return "Login to RetroAchievements in system settings."
+        logged_in = self.is_logged_in()
+        if not logged_in:
+            return "Login to RetroAchievements in system settings."
+        if getattr(self, "main_config_freedom", None) is False:
+            return (
+                "Enable Settings > Advanced > RetroArch Config Freedom, "
+                "or the proxy redirect won't persist."
+            )
+        return None
 
     def handle_events(self) -> None:
         for event in self.pygame.event.get():
@@ -490,20 +538,15 @@ class MenuSdlSession:
 
     def handle_raw_input(self) -> None:
         for key in read_keys(self.input_handles):
-            log_menu_sdl(f"raw key={key}")
-            if key in {KEY_UP, KEY_LEFT, BTN_DPAD_UP, BTN_DPAD_LEFT}:
+            action = action_for(key, self.input_map)
+            log_menu_sdl(f"raw key={key} action={action}")
+            if action in ("up", "left"):
                 self.navigate(-1)
-                continue
-
-            if key in {KEY_DOWN, KEY_RIGHT, BTN_DPAD_DOWN, BTN_DPAD_RIGHT}:
+            elif action in ("down", "right"):
                 self.navigate(1)
-                continue
-
-            if key in {KEY_ENTER, KEY_SPACE, KEY_S, BTN_SOUTH, BTN_START}:
+            elif action == "confirm":
                 self.activate_selected()
-                continue
-
-            if key in {KEY_ESC, KEY_BACKSPACE, KEY_Q, BTN_EAST, BTN_SELECT}:
+            elif action == "back":
                 self.go_back()
 
     def handle_key(self, key: int) -> None:
@@ -580,6 +623,10 @@ class MenuSdlSession:
             self.view = "pending_awards"
             self.restore_view_position("pending_awards")
             self.refresh_pending_awards()
+            return
+
+        if selected_label == "Controls":
+            self.run_calibration()
             return
 
         if selected_label == "Uninstall":
@@ -1062,6 +1109,8 @@ class MenuSdlSession:
             self.main_online = False
         if not hasattr(self, "main_logged_in"):
             self.main_logged_in = False
+        if not hasattr(self, "main_config_freedom"):
+            self.main_config_freedom = None
         if not hasattr(self, "main_autostart_supported"):
             self.main_autostart_supported = False
         if not hasattr(self, "main_autostart_enabled"):
@@ -1081,6 +1130,11 @@ class MenuSdlSession:
         self.main_running = self.read_proxy_running()
         self.main_online = online_check(self.config_data)
         self.main_logged_in = self.is_logged_in(self.config_data)
+        self.main_config_freedom = (
+            muos_retroarch_config_freedom()
+            if getattr(self, "is_muos", False)
+            else None
+        )
         self.main_autostart_supported = autostart_supported(self.config_data)
         self.main_autostart_enabled = (
             self.main_autostart_supported and autostart_enabled(self.config_data)
@@ -1268,6 +1322,11 @@ class MenuSdlSession:
             )
 
     def uninstall(self) -> None:
+        muos_paths = muos_uninstall_paths()
+        if muos_paths is not None:
+            self.uninstall_muos(muos_paths)
+            return
+
         launcher = "/userdata/system/raofflineproxy/bin/raofflineproxy-uninstall"
         try:
             self.storage.close()
@@ -1278,3 +1337,173 @@ class MenuSdlSession:
         except Exception:
             pass
         os.execv(launcher, [launcher])
+
+    def uninstall_muos(self, paths: list[Path]) -> None:
+        # Revert the RetroArch config patch and stop the service BEFORE removing
+        # files, so we never leave RetroArch pointed at a proxy that is gone.
+        try:
+            stop_proxy_inline()
+        except Exception:
+            pass
+        try:
+            self.storage.close()
+        except Exception:
+            pass
+        try:
+            close_input_devices(self.input_handles)
+        except Exception:
+            pass
+
+        # The app directory holds the running code, so remove it from a detached
+        # process after the menu exits.
+        argv = build_uninstall_argv(paths)
+        if argv is not None:
+            try:
+                subprocess.Popen(
+                    argv,
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        self.running = False
+
+    def drain_input(self, settle_seconds: float) -> None:
+        # Discard any pending/held input (e.g. the press that opened this view)
+        # so it is not captured as the next button.
+        end = time.monotonic() + settle_seconds
+        while time.monotonic() < end:
+            read_keys(self.input_handles)
+            self.pygame.event.pump()
+            self.clock.tick(FPS)
+
+    def run_calibration(self) -> None:
+        # Modal: for each action, capture whichever raw evdev code the pressed
+        # button emits. A step left untouched for the countdown keeps its current
+        # mapping. Captured codes are saved and merged over the defaults.
+        captured: dict[str, list[int]] = {}
+        chosen_codes: set[int] = set()  # prevent one code mapping to two actions
+        for step, action in enumerate(ACTIONS):
+            self.drain_input(0.4)
+            deadline = time.monotonic() + CALIBRATION_STEP_SECONDS
+            chosen = None
+            while chosen is None and time.monotonic() < deadline:
+                # Render the prompt first so the step is always shown, even if a
+                # key is already queued on the first iteration.
+                self.render_calibration(step, action, max(0, int(deadline - time.monotonic())))
+                for event in self.pygame.event.get():
+                    if event.type == self.pygame.QUIT:
+                        self.running = False
+                        return
+                    if event.type == self.pygame.KEYDOWN and event.key == self.pygame.K_ESCAPE:
+                        return  # cancel calibration, keep existing map
+                key = read_next_key(self.input_handles)
+                if key == KEY_ESC:
+                    return  # ESC via evdev also cancels (same as keyboard ESC)
+                if key is not None and key not in chosen_codes:
+                    chosen = key  # ignore a code already bound earlier this run
+                    break
+                self.clock.tick(FPS)
+            if chosen is not None:
+                captured[action] = [chosen]
+                chosen_codes.add(chosen)
+                log_menu_sdl(f"calibrate {action} -> code {chosen}")
+
+        if captured:
+            # Merge over the saved map so untouched buttons keep their mapping,
+            # while a re-binding wins even if another action held that code.
+            save_input_map(merge_calibration(captured, load_saved_input_map()))
+            self.input_map = load_input_map()
+            self.render_calibration_done(len(captured))
+            self.drain_input(1.5)
+        if self.running:
+            self.run_test_controls()
+
+    def render_calibration(self, step: int, action: str, remaining: int) -> None:
+        self.surface.fill(BACKGROUND_COLOR)
+        title = self.title_font.render("Calibrate Controls", False, PRIMARY_COLOR)
+        self.surface.blit(title, (LEFT_MARGIN, max(36, self.height // 12)))
+
+        step_text = self.status_font.render(
+            f"Step {step + 1} of {len(ACTIONS)}", False, STATUS_COLOR
+        )
+        self.surface.blit(step_text, (LEFT_MARGIN, max(36, self.height // 12) + 50))
+
+        prompt = self.item_font.render(
+            f"Press button for:  {ACTION_LABELS[action]}", False, SELECTED_COLOR
+        )
+        self.surface.blit(prompt, (LEFT_MARGIN, self.height // 2 - 24))
+
+        hint = self.status_font.render(
+            f"wait {remaining}s to keep current", False, STATUS_COLOR
+        )
+        self.surface.blit(hint, (LEFT_MARGIN, self.height // 2 + 24))
+        self.pygame.display.flip()
+
+    def render_calibration_done(self, count: int) -> None:
+        self.surface.fill(BACKGROUND_COLOR)
+        title = self.title_font.render("Calibrate Controls", False, PRIMARY_COLOR)
+        self.surface.blit(title, (LEFT_MARGIN, max(36, self.height // 12)))
+        msg = self.item_font.render(
+            f"Saved {count} button{'s' if count != 1 else ''}.", False, SELECTED_COLOR
+        )
+        self.surface.blit(msg, (LEFT_MARGIN, self.height // 2 - 12))
+        self.pygame.display.flip()
+
+    def run_test_controls(self) -> None:
+        # Echo the action each pressed button resolves to, so the user can verify
+        # the mapping. Pressing Back exits (proving Back works); also auto-exits
+        # on idle so a wrong mapping can never trap the user here.
+        self.drain_input(0.4)
+        last: tuple[str, int] | None = None  # (action, code)
+        idle_deadline = time.monotonic() + TEST_CONTROLS_IDLE_SECONDS
+        while True:
+            for event in self.pygame.event.get():
+                if event.type == self.pygame.QUIT:
+                    self.running = False
+                    return
+                if event.type == self.pygame.KEYDOWN and event.key == self.pygame.K_ESCAPE:
+                    return
+            exited = False
+            for key in read_keys(self.input_handles):
+                action = action_for(key, self.input_map) or "unmapped"
+                last = (action, key)
+                # Only a recognized button resets the idle timer, so a device
+                # streaming unmapped axis noise can't keep the screen open.
+                if action != "unmapped":
+                    idle_deadline = time.monotonic() + TEST_CONTROLS_IDLE_SECONDS
+                if action == "back":
+                    exited = True
+            self.render_test_controls(last, max(0, int(idle_deadline - time.monotonic())))
+            if exited:
+                self.drain_input(0.5)  # let the "Back" register show briefly
+                return
+            if time.monotonic() > idle_deadline:
+                return
+            self.clock.tick(FPS)
+
+    def render_test_controls(self, last: tuple[str, int] | None, remaining: int) -> None:
+        self.surface.fill(BACKGROUND_COLOR)
+        title = self.title_font.render("Test Controls", False, PRIMARY_COLOR)
+        self.surface.blit(title, (LEFT_MARGIN, max(36, self.height // 12)))
+
+        if last is None:
+            text, color = "Press any button...", STATUS_COLOR
+        else:
+            action, code = last
+            nice = {
+                "confirm": "Confirm", "back": "Back", "up": "Up",
+                "down": "Down", "left": "Left", "right": "Right",
+            }.get(action, "Unmapped")
+            text = f"{nice}   (code {code})"
+            color = SELECTED_COLOR if action != "unmapped" else ERROR_COLOR
+        self.surface.blit(
+            self.title_font.render(text, False, color),
+            (LEFT_MARGIN, self.height // 2 - 24),
+        )
+        hint = self.status_font.render(
+            f"Back to finish  -  auto-exit in {remaining}s", False, STATUS_COLOR
+        )
+        self.surface.blit(hint, (LEFT_MARGIN, self.height // 2 + 28))
+        self.pygame.display.flip()

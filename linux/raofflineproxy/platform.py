@@ -1,8 +1,24 @@
+import os
 from pathlib import Path
 
-from .config import DEFAULT_ONION_STARTUP_SCRIPT, detect_retroarch_cfg
+from .config import (
+    DEFAULT_ONION_STARTUP_SCRIPT,
+    MUOS_APP_SUBPATH,
+    detect_muos_mount,
+    detect_retroarch_cfg,
+    retroarch_cfg_candidates,
+)
 
 DEFAULT_KNULLI_ROMS_ROOT = Path("/userdata/roms")
+MUOS_GLYPH_PATH = Path(
+    "/opt/muos/default/MUOS/theme/active/glyph/muxapp/raofflineproxy.png"
+)
+# muOS "RetroArch Config Freedom" flag (Settings > Advanced), stored by GET_VAR
+# "config" as "1"/"0". With it OFF (the default) muOS deletes and re-copies the
+# global retroarch.cfg from its template on every launch (func.sh
+# CONFIGURE_RETROARCH), wiping our cheevos_custom_host patch -- so the proxy
+# redirect only persists when this is ON.
+MUOS_CONFIG_FREEDOM_FLAG = Path("/opt/muos/config/settings/advanced/retrofree")
 DEFAULT_KNULLI_STARTUP_SCRIPT = Path("/userdata/system/custom.sh")
 ROM_DIRECTORY_KEYS = [
     "rgui_browser_directory",
@@ -16,7 +32,30 @@ def resolve_retroarch_cfg(config_data: dict) -> str:
     return str(config_data.get("retroarch_cfg") or detect_retroarch_cfg())
 
 
+def resolve_retroarch_cfg_search(config_data: dict) -> list[str]:
+    """Ordered, de-duplicated cfg paths to search for RetroAchievements creds.
+
+    The configured/detected primary comes first (so a setup where the primary
+    holds the token behaves exactly as before), then every other known cfg that
+    exists -- muOS may save the login token in a different file than the one we
+    patch, which otherwise reads as "not logged in".
+    """
+    paths = [resolve_retroarch_cfg(config_data)]
+    for candidate in retroarch_cfg_candidates():
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
 def resolve_rom_root(config_data: dict) -> Path:
+    configured = config_data.get("roms_root") or os.environ.get(
+        "RAOFFLINEPROXY_ROMS_ROOT"
+    )
+    if configured:
+        candidate = Path(str(configured)).expanduser()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
     cfg_path = Path(resolve_retroarch_cfg(config_data))
     values = read_retroarch_cfg_values(cfg_path)
     for key in ROM_DIRECTORY_KEYS:
@@ -29,6 +68,12 @@ def resolve_rom_root(config_data: dict) -> Path:
 
     if DEFAULT_KNULLI_ROMS_ROOT.exists() and DEFAULT_KNULLI_ROMS_ROOT.is_dir():
         return DEFAULT_KNULLI_ROMS_ROOT
+
+    muos_mount = detect_muos_mount()
+    if muos_mount is not None:
+        muos_roms = muos_mount / "ROMS"
+        if muos_roms.exists() and muos_roms.is_dir():
+            return muos_roms
 
     return cfg_path.parent
 
@@ -149,6 +194,53 @@ def strip_autostart_block(content: str) -> str:
 
     end += len(AUTOSTART_SENTINEL_END)
     return f"{content[:start]}{content[end:]}"
+
+
+def muos_retroarch_config_freedom() -> bool | None:
+    """Whether muOS 'RetroArch Config Freedom' (Settings > Advanced) is enabled.
+
+    Returns True (on -> our retroarch.cfg patch persists across launches), False
+    (off -> muOS resets the cfg from its template each launch and wipes the
+    patch, so the proxy redirect won't stick), or None when the flag file is
+    absent (not muOS, or a muOS build predating the setting).
+    """
+    try:
+        return MUOS_CONFIG_FREEDOM_FLAG.read_text(encoding="utf-8").strip() == "1"
+    except OSError:
+        return None
+
+
+def muos_app_dir() -> Path | None:
+    """Return the installed muOS application directory, or None when not on muOS.
+
+    The launcher exports APP_DIR; fall back to the documented location under the
+    detected SD mount so this also works when invoked directly.
+    """
+    configured = os.environ.get("APP_DIR")
+    if configured:
+        return Path(configured)
+
+    mount = detect_muos_mount()
+    if mount is None:
+        return None
+    return mount / MUOS_APP_SUBPATH
+
+
+def muos_uninstall_paths() -> list[Path] | None:
+    """Paths to remove when uninstalling on muOS, or None when not on muOS.
+
+    Returns the app directory (which also holds cache/login/queue data and logs),
+    the SD-root diagnostics report, and the Applications-list glyph.
+    """
+    mount = detect_muos_mount()
+    app_dir = muos_app_dir()
+    if mount is None or app_dir is None:
+        return None
+    return [
+        app_dir,
+        mount / "RAOFFLINEPROXY-REPORT.txt",
+        MUOS_GLYPH_PATH,
+    ]
 
 
 def onion_autostart_script() -> str:

@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
 from . import cache_keys
-from .auth import resolve_credentials
+from .auth import import_saved_login, resolve_credentials
 from .award_signing import sign_award
 from .batocera_conf import enforce_batocera_conf
 from .config import FALLBACK_USER_AGENT, proxy_host, proxy_port, upstream_host
@@ -27,7 +27,7 @@ from .network import (
     read_response_bytes,
     response_content_type,
 )
-from .retroarch_cfg import enforce_patched_cfg
+from .retroarch_cfg import enforce_patched_cfg, patch_appended_cheevos_cfg
 from .rom_cache import (
     build_unlocks_array,
     cache_session,
@@ -452,6 +452,11 @@ class ProxyRuntimeServer(ThreadingTCPServer):
         if cached is not None:
             return ok_json(cached["responseBody"])
 
+        if action == "login2":
+            synthesized = self.build_offline_login_response(path, raw_body)
+            if synthesized is not None:
+                return ok_json(synthesized)
+
         if action == "gameid":
             LOGGER.warning(
                 "Offline gameid cache miss requestedKey=%s sampleKeys=%s",
@@ -478,6 +483,33 @@ class ProxyRuntimeServer(ThreadingTCPServer):
                     return ok_json(cached["responseBody"])
 
         return error_json(503, "no cached response")
+
+    def build_offline_login_response(self, path: str, raw_body: str) -> str | None:
+        """Synthesize a successful login2 response while offline.
+
+        Offline, the proxy is the RetroAchievements authority, so a login for the
+        configured user should succeed without a server round-trip. Otherwise a
+        device that never persisted a token -- e.g. muOS, which stores only
+        username+password -- could never log in offline. The token from the
+        request is echoed when present; everything downstream is served locally,
+        and a real token is obtained at flush time once back online. Returns None
+        when the request carries no username (nothing to log in as).
+        """
+        user = extract_request_param(path, raw_body, "u")
+        if not user:
+            return None
+        token = extract_request_param(path, raw_body, "t") or "offline"
+        return json.dumps(
+            {
+                "Success": True,
+                "User": user,
+                "Token": token,
+                "Score": 0,
+                "SoftcoreScore": 0,
+                "Messages": 0,
+            },
+            separators=(",", ":"),
+        )
 
     def build_offline_unlocks_response(self, game_id: int, user: str) -> str:
         entry = self.storage.get_cache(cache_keys.unlocks(game_id, user))
@@ -805,6 +837,8 @@ class ConfigEnforcer(threading.Thread):
                     changed = enforce_patched_cfg(cfg_path, self.config_data)
                     if changed:
                         LOGGER.info("Re-applied RetroArch proxy patch to %s", cfg_path)
+                    if patch_appended_cheevos_cfg(cfg_path, self.config_data):
+                        LOGGER.info("Re-applied proxy patch to appended cheevos cfg")
                 batocera_changed = enforce_batocera_conf(self.config_data)
                 if batocera_changed:
                     LOGGER.info("Re-applied batocera.conf cheevos settings")
@@ -821,8 +855,18 @@ def run_proxy_service(
     periodic_refresh = PeriodicRefresh(server)
     config_enforcer = ConfigEnforcer(config_data)
 
+    # Import the saved RetroAchievements login from the cfg token so login works
+    # offline immediately (docs: "Start the proxy ... imports your saved login").
+    # Token-only, so it never blocks startup on the network.
+    import_saved_login(storage, config_data)
+
     try:
         if server.refresh_reachability(force_probe=True):
+            # Online: exchange the saved username/password for a token and cache
+            # it, so login still works after Wi-Fi is turned off. muOS stores only
+            # username+password (no token), so the token-only import above cannot
+            # seed the login -- this fetches and caches it while the network is up.
+            resolve_credentials(storage, config_data)
             server.flush_pending_awards()
         connectivity_monitor.start()
         periodic_refresh.start()
